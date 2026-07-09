@@ -3,7 +3,7 @@ name: Moniteur reservation Kouver
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "42 * * * *"
 
 jobs:
   test-reservation:
