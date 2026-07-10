@@ -152,26 +152,51 @@ def tenter_reservation(page) -> dict:
     infos["couverts"] = couverts
     print(f"    Couverts choisis : {couverts}")
 
-    # 2) Date = J+2 (calendrier parfois capricieux en mode invisible :
-    #    on réessaie d'ouvrir le calendrier jusqu'à voir le jour cible)
-    cible = date.today() + timedelta(days=JOURS_A_LAVANCE)
-    infos["date"] = cible.strftime("%d/%m/%Y")
+    # 2) Date : on ouvre le calendrier, puis on choisit le PREMIER JOUR
+    #    RÉELLEMENT DISPONIBLE à partir de J+2. Les jours de fermeture sont
+    #    grisés et non cliquables (donc absents des "liens") ; viser J+2 en dur
+    #    plantait dès que ce jour tombait un jour de fermeture (ex. dimanche).
+    today = date.today()
+    seuil = today.day + JOURS_A_LAVANCE     # on veut un jour >= J+2 si possible
     champ_date = page.get_by_role("textbox", name="Sélectionnez une date")
-    lien_jour = page.get_by_role("link", name=str(cible.day), exact=True).first
+    # Les jours cliquables sont des liens dont le nom est un simple nombre.
+    jours_liens = page.get_by_role("link", name=re.compile(r"^\d{1,2}$"))
+
     ouvert = False
     for _ in range(4):
         champ_date.scroll_into_view_if_needed()
         champ_date.click()
         try:
-            lien_jour.wait_for(state="visible", timeout=5000)
+            jours_liens.first.wait_for(state="visible", timeout=5000)
             ouvert = True
             break
         except Exception:
             page.wait_for_timeout(600)
     if not ouvert:
         raise RuntimeError("le calendrier de sélection de date ne s'est pas ouvert")
-    lien_jour.scroll_into_view_if_needed()
-    lien_jour.click()
+
+    # Récupère les jours réellement disponibles (cliquables et visibles)
+    dispo = []
+    for i in range(jours_liens.count()):
+        el = jours_liens.nth(i)
+        try:
+            if not el.is_visible():
+                continue
+            txt = (el.inner_text() or "").strip()
+            if txt.isdigit():
+                dispo.append((int(txt), el))
+        except Exception:
+            continue
+    if not dispo:
+        raise AucunCreneau("aucune date disponible dans le calendrier")
+
+    # Premier jour >= J+2 ; sinon le dernier jour dispo du mois affiché
+    futurs = sorted((d, el) for d, el in dispo if d >= seuil)
+    jour_num, jour_el = futurs[0] if futurs else max(dispo, key=lambda x: x[0])
+    infos["date"] = f"{jour_num:02d}/{today.month:02d}/{today.year}"
+    print(f"    Date choisie     : {infos['date']}")
+    jour_el.scroll_into_view_if_needed()
+    jour_el.click()
     page.wait_for_timeout(1500)  # laisser les créneaux se charger
 
     # 3) Créneau au hasard PARMI CEUX VISIBLES.
