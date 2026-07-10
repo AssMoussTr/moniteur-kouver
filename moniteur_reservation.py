@@ -39,6 +39,11 @@ URL = "https://foodcollect.fr/store/restaurant-kouver/reserver"
 # Décalage de la date de réservation (J+2 comme demandé)
 JOURS_A_LAVANCE = 2
 
+# Nombre de tentatives complètes avant d'envoyer une alerte.
+# Évite les fausses alertes dues à un hoquet ponctuel (page lente, calendrier
+# qui tarde à s'ouvrir...). Un vrai bug du service échouera les 3 fois.
+MAX_ESSAIS = 3
+
 # Tablée maximale tirée au sort (les grandes tablées ont souvent 0 dispo,
 # ce qui ferait croire à tort qu'il n'y a aucun créneau)
 MAX_COUVERTS = 4
@@ -233,71 +238,89 @@ def run():
     horodatage = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{horodatage}] Test de réservation…")
 
-    erreurs_5xx = []          # réponses serveur >= 500 (ex. le fameux 501)
     headless = os.getenv("HEADFUL") is None
+    raison = None
+    details = ""
+    capture = None
+    succes = False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
-        context = browser.new_context(locale="fr-FR",
-                                      viewport={"width": 1366, "height": 900})
-        page = context.new_page()
-        page.set_default_timeout(20000)
 
-        def on_response(resp):
+        for essai in range(1, MAX_ESSAIS + 1):
+            erreurs_5xx = []      # réponses serveur >= 500 (ex. le fameux 501)
+            context = browser.new_context(locale="fr-FR",
+                                          viewport={"width": 1366, "height": 900})
+            page = context.new_page()
+            page.set_default_timeout(20000)
+            page.on("response", lambda r: erreurs_5xx.append(f"{r.status} {r.url}")
+                    if r.status >= 500 else None)
+
             try:
-                if resp.status >= 500:
-                    erreurs_5xx.append(f"{resp.status} {resp.url}")
-            except Exception:
-                pass
-        page.on("response", on_response)
+                page.goto(URL, wait_until="domcontentloaded")
+                page.wait_for_timeout(1500)     # laisser le JS de la page s'initialiser
+                infos = tenter_reservation(page)
+                details = (f"Couverts : {infos.get('couverts')} | Date : {infos.get('date')} "
+                           f"| Créneau : {infos.get('creneau')}")
 
-        raison = None
-        details = ""
-        capture = None
-        try:
-            page.goto(URL, wait_until="domcontentloaded")
-            infos = tenter_reservation(page)
-            details = (f"Couverts : {infos.get('couverts')} | Date : {infos.get('date')} "
-                       f"| Créneau : {infos.get('creneau')}")
+                if erreurs_5xx:
+                    # Vraie erreur serveur (le bug recherché) : on alerte sans retenter.
+                    raison = "Erreur serveur (5xx/501) pendant la réservation"
+                    details += "\nRéponses serveur ≥500 : " + " ; ".join(erreurs_5xx[:5])
+                    try:
+                        page.screenshot(path=CAPTURE, full_page=True)
+                        capture = CAPTURE
+                    except Exception:
+                        pass
+                    context.close()
+                    break
 
-            if erreurs_5xx:
-                raison = "Erreur serveur (5xx/501) pendant la réservation"
-            else:
+                succes = True
                 print(f"    ✅ Réservation confirmée ({details}) — aucun problème.")
+                context.close()
+                break
 
-        except AucunCreneau as e:
-            print(f"    ⚠️  {e}")
-            try:
-                page.screenshot(path=DEBUG_CAPTURE, full_page=True)
-                print(f"    🖼️  Capture de la page enregistrée : {DEBUG_CAPTURE}")
-            except Exception:
-                pass
-            if ALERTE_SI_AUCUN_CRENEAU:
-                raison = "Aucun créneau disponible à J+2"
-                details = str(e)
+            except AucunCreneau as e:
+                # Pas un vrai bug (souvent jour de fermeture) : on n'alerte pas.
+                print(f"    ⚠️  {e}")
+                try:
+                    page.screenshot(path=DEBUG_CAPTURE, full_page=True)
+                except Exception:
+                    pass
+                if ALERTE_SI_AUCUN_CRENEAU:
+                    raison = "Aucun créneau disponible à J+2"
+                    details = str(e)
+                context.close()
+                break
 
-        except Exception as e:
-            # Soit le service a planté au moment de réserver, soit le parcours
-            # n'a pas pu aller au bout (page modifiée). On alerte dans les deux cas,
-            # en le signalant clairement.
-            if erreurs_5xx:
-                raison = "Erreur serveur (5xx/501) pendant la réservation"
-            else:
-                raison = "Le bot n'a pas pu terminer la réservation (à vérifier)"
-            details = (details + f"\nMessage technique : {type(e).__name__} — {e}").strip()
+            except Exception as e:
+                # Le parcours n'a pas pu aller au bout. Cela peut être un hoquet
+                # ponctuel -> on RETENTE. On n'alerte que si toutes les tentatives échouent.
+                msg = f"{type(e).__name__} — {e}"
+                print(f"    ⚠️  Tentative {essai}/{MAX_ESSAIS} échouée : {msg}")
+                if erreurs_5xx:
+                    raison = "Erreur serveur (5xx/501) pendant la réservation"
+                else:
+                    raison = "Le bot n'a pas pu terminer la réservation (à vérifier)"
+                details = f"(après {essai} tentative(s)) {msg}"
+                try:
+                    page.screenshot(path=CAPTURE, full_page=True)
+                    capture = CAPTURE
+                except Exception:
+                    pass
+                context.close()
+                if essai < MAX_ESSAIS:
+                    raison = None      # on efface : on va retenter
+                    p_wait = 3
+                    print(f"    ⏳ Nouvelle tentative dans {p_wait}s…")
+                    time.sleep(p_wait)
+                    continue
+                break
 
-        # Capture d'écran si problème
-        if raison:
-            try:
-                page.screenshot(path=CAPTURE, full_page=True)
-                capture = CAPTURE
-            except Exception:
-                pass
-            if erreurs_5xx:
-                details += "\nRéponses serveur ≥500 : " + " ; ".join(erreurs_5xx[:5])
-
-        context.close()
         browser.close()
+
+    if succes:
+        raison = None
 
     if raison:
         print(f"    ❌ {raison}")
