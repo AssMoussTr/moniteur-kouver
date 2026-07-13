@@ -60,13 +60,16 @@ TEST = {
     "firstname": "TEST",
     "lastname": "BOT",
     "email": "test-bot@kouver.fr",
-    "phone": "0664850542",
+    "phone": "0685644205",
     "message": "RESERVATION TEST AUTOMATIQUE - NE PAS TRAITER",
 }
 
-# Destinataires de l'alerte
-EMAIL_TO = "assane@kouver.fr"
-EMAIL_CC = ["guillaume@kouver.fr", "jeanalexis@kouver.fr"]
+# Destinataires de l'alerte — lus depuis l'environnement (Secrets GitHub),
+# pour ne pas exposer d'adresses e-mail dans un dépôt public.
+#   EMAIL_TO : destinataire principal
+#   EMAIL_CC : destinataires en copie, séparés par des virgules
+EMAIL_TO = os.getenv("EMAIL_TO", "")
+EMAIL_CC = [a.strip() for a in os.getenv("EMAIL_CC", "").split(",") if a.strip()]
 SUJET = "Détection d'erreur - réservation Joie Kouver"
 
 SMTP = {
@@ -97,6 +100,11 @@ def envoyer_alerte(raison: str, details: str, capture: str | None):
 
     if not (SMTP["host"] and SMTP["user"] and SMTP["pass"]):
         print("[!] SMTP non configuré — alerte non envoyée.", file=sys.stderr)
+        print(corps)
+        return
+    if not EMAIL_TO:
+        print("[!] EMAIL_TO non configuré (Secret manquant) — alerte non envoyée.",
+              file=sys.stderr)
         print(corps)
         return
 
