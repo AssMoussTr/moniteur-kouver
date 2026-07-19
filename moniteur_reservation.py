@@ -90,7 +90,15 @@ CAPTURE = str(Path(__file__).with_name("derniere_erreur.png"))
 # ===========================================================================
 # E-MAIL D'ALERTE
 # ===========================================================================
-def envoyer_alerte(raison: str, details: str, capture: str | None):
+def envoyer_alerte(raison: str, details: str, capture: str | None,
+                   erreur_serveur: bool = False):
+    """Envoie l'alerte par e-mail.
+
+    erreur_serveur=True  -> vrai incident (5xx/501) : on prévient TOUTE l'équipe
+                            (EMAIL_TO + EMAIL_CC).
+    erreur_serveur=False -> souci technique du bot : on ne dérange que EMAIL_TO.
+    """
+    destinataires_cc = EMAIL_CC if erreur_serveur else []
     horodatage = datetime.now().strftime("%d/%m/%Y à %H:%M:%S")
     corps = (
         "Une erreur a été détectée lors de l'essai du bot en faisant une réservation.\n\n"
@@ -116,8 +124,8 @@ def envoyer_alerte(raison: str, details: str, capture: str | None):
     outer["Subject"] = SUJET
     outer["From"] = SMTP["from"]
     outer["To"] = EMAIL_TO
-    if EMAIL_CC:
-        outer["Cc"] = ", ".join(EMAIL_CC)
+    if destinataires_cc:
+        outer["Cc"] = ", ".join(destinataires_cc)
     outer.attach(MIMEText(corps, "plain", "utf-8"))
 
     if capture and Path(capture).exists():
@@ -127,7 +135,7 @@ def envoyer_alerte(raison: str, details: str, capture: str | None):
                            filename="erreur_reservation.png")
             outer.attach(img)
 
-    rcpts = [EMAIL_TO] + EMAIL_CC
+    rcpts = [EMAIL_TO] + destinataires_cc
     if int(SMTP["port"]) == 465:
         with smtplib.SMTP_SSL(SMTP["host"], SMTP["port"], timeout=30) as s:
             s.login(SMTP["user"], SMTP["pass"])
@@ -137,7 +145,7 @@ def envoyer_alerte(raison: str, details: str, capture: str | None):
             s.starttls()
             s.login(SMTP["user"], SMTP["pass"])
             s.send_message(outer, from_addr=SMTP["from"], to_addrs=rcpts)
-    cc_txt = f" (cc {', '.join(EMAIL_CC)})" if EMAIL_CC else ""
+    cc_txt = f" (cc {', '.join(destinataires_cc)})" if destinataires_cc else " (seul)"
     print(f"    ✉️  Alerte envoyée à {EMAIL_TO}{cc_txt}")
 
 
@@ -311,6 +319,7 @@ def run():
     details = ""
     capture = None
     succes = False
+    est_erreur_serveur = False
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=headless)
@@ -334,6 +343,7 @@ def run():
                 if erreurs_5xx:
                     # Vraie erreur serveur (le bug recherché) : on alerte sans retenter.
                     raison = "Erreur serveur (5xx/501) pendant la réservation"
+                    est_erreur_serveur = True
                     details += "\nRéponses serveur ≥500 : " + " ; ".join(erreurs_5xx[:5])
                     try:
                         page.screenshot(path=CAPTURE, full_page=True)
@@ -368,6 +378,7 @@ def run():
                 print(f"    ⚠️  Tentative {essai}/{MAX_ESSAIS} échouée : {msg}")
                 if erreurs_5xx:
                     raison = "Erreur serveur (5xx/501) pendant la réservation"
+                    est_erreur_serveur = True
                 else:
                     raison = "Le bot n'a pas pu terminer la réservation (à vérifier)"
                 details = f"(après {essai} tentative(s)) {msg}"
@@ -379,6 +390,7 @@ def run():
                 context.close()
                 if essai < MAX_ESSAIS:
                     raison = None      # on efface : on va retenter
+                    est_erreur_serveur = False
                     p_wait = 3
                     print(f"    ⏳ Nouvelle tentative dans {p_wait}s…")
                     time.sleep(p_wait)
@@ -392,7 +404,7 @@ def run():
 
     if raison:
         print(f"    ❌ {raison}")
-        envoyer_alerte(raison, details, capture)
+        envoyer_alerte(raison, details, capture, est_erreur_serveur)
 
 
 if __name__ == "__main__":
