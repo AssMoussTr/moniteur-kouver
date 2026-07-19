@@ -44,6 +44,10 @@ JOURS_A_LAVANCE = 2
 # qui tarde à s'ouvrir...). Un vrai bug du service échouera les 3 fois.
 MAX_ESSAIS = 3
 
+# Nombre de jours consécutifs testés à partir de J+2. Si le premier jour est
+# fermé (aucun créneau), le bot essaie le suivant, puis le suivant.
+MAX_JOURS_TESTES = 3
+
 # Tablée maximale tirée au sort (les grandes tablées ont souvent 0 dispo,
 # ce qui ferait croire à tort qu'il n'y a aucun créneau)
 MAX_COUVERTS = 4
@@ -198,36 +202,67 @@ def tenter_reservation(page) -> dict:
     if not dispo:
         raise AucunCreneau("aucune date disponible dans le calendrier")
 
-    # Premier jour >= J+2 ; sinon le dernier jour dispo du mois affiché
-    futurs = sorted((d, el) for d, el in dispo if d >= seuil)
-    jour_num, jour_el = futurs[0] if futurs else max(dispo, key=lambda x: x[0])
-    infos["date"] = f"{jour_num:02d}/{today.month:02d}/{today.year}"
-    print(f"    Date choisie     : {infos['date']}")
-    jour_el.scroll_into_view_if_needed()
-    jour_el.click()
-    page.wait_for_timeout(1500)  # laisser les créneaux se charger
+    # Jours candidats : à partir de J+2, dans l'ordre. Si le premier n'offre
+    # aucun créneau (jour de fermeture), on essaiera le suivant, etc.
+    candidats = sorted([(d, el) for d, el in dispo if d >= seuil], key=lambda x: x[0])
+    if not candidats:
+        candidats = [max(dispo, key=lambda x: x[0])]
+    candidats = candidats[:MAX_JOURS_TESTES]
 
     # 3) Créneau au hasard PARMI CEUX VISIBLES.
     #    La page garde en mémoire tous les horaires de la journée (souvent
     #    cachés) ; seuls les créneaux réellement disponibles sont visibles.
     #    On filtre donc sur ":visible" pour ne cliquer qu'un créneau affiché.
-    slots = None
-    fin = time.time() + 20
-    while time.time() < fin:
-        loc = page.locator("[id^='slot-']:visible")
-        if loc.count() == 0:
-            loc = page.locator(".time-slot-button:visible")
-        if loc.count() == 0:
-            loc = page.get_by_text(re.compile(r'^\s*\d{1,2}\s*:\s*\d{2}\s*$'))
-        if loc.count() > 0:
-            slots = loc
-            break
-        page.wait_for_timeout(500)
-    if slots is None:
-        raise AucunCreneau(f"aucun créneau proposé à J+2 ({infos['date']})")
+    def creneaux_visibles():
+        """Renvoie la liste des créneaux RÉELLEMENT visibles (donc cliquables).
+        La visibilité est vérifiée élément par élément : c'est le seul filtre
+        fiable, la page gardant en mémoire tous les horaires du jour."""
+        for selecteur in ("[id^='slot-']", ".time-slot-button", ".time-slot-label"):
+            loc = page.locator(selecteur)
+            visibles = []
+            for i in range(loc.count()):
+                el = loc.nth(i)
+                try:
+                    if el.is_visible():
+                        visibles.append(el)
+                except Exception:
+                    continue
+            if visibles:
+                return visibles
+        return []
 
-    n = slots.count()
-    choisi = slots.nth(random.randrange(n))
+    slots = []
+    jours_essayes = []
+    for idx, (jour_num, jour_el) in enumerate(candidats):
+        infos["date"] = f"{jour_num:02d}/{today.month:02d}/{today.year}"
+        jours_essayes.append(infos["date"])
+        if idx > 0:
+            # Rouvrir le calendrier pour changer de jour
+            champ_date.scroll_into_view_if_needed()
+            champ_date.click()
+            page.wait_for_timeout(600)
+        jour_el.scroll_into_view_if_needed()
+        jour_el.click()
+        page.wait_for_timeout(1500)     # laisser les créneaux se charger
+
+        fin = time.time() + 12
+        while time.time() < fin:
+            slots = creneaux_visibles()
+            if slots:
+                break
+            page.wait_for_timeout(500)
+
+        if slots:
+            print(f"    Date choisie     : {infos['date']}")
+            break
+        print(f"    (aucun créneau le {infos['date']} — on essaie le jour suivant)")
+
+    if not slots:
+        raise AucunCreneau("aucun créneau disponible les jours testés : "
+                           + ", ".join(jours_essayes))
+
+    n = len(slots)
+    choisi = random.choice(slots)
     infos["creneau"] = (choisi.get_attribute("id") or choisi.inner_text() or "").strip()
     print(f"    Créneau choisi   : {infos['creneau']} (parmi {n} visibles)")
     choisi.click()
